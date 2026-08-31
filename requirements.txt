@@ -4,3 +4,4 @@ streamlit-quill
 python-pptx
 Pillow
 aspose-slides
+PyMuPDF

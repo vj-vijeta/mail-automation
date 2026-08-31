@@ -27,6 +27,29 @@ st.write("Run a regular update campaign, or a separate certificate campaign — 
 
 
 # =========================================================================
+# HELPER: FLEXIBLE COLUMN NORMALIZATION
+# =========================================================================
+def normalize_dataframe_columns(df, target_name_col="School Name"):
+    """
+    Standardizes 'email' and target name columns to exact keys ('Email', target_name_col)
+    regardless of user casing (e.g., 'EMAIL', 'email ', 'School name').
+    """
+    if df is None or df.empty:
+        return df
+
+    rename_map = {}
+    for col in df.columns:
+        clean_col = str(col).strip().lower()
+        if clean_col == "email":
+            rename_map[col] = "Email"
+        elif clean_col in [target_name_col.lower(), "name", "recipient", "school name"]:
+            rename_map[col] = target_name_col
+
+    df = df.rename(columns=rename_map)
+    return df
+
+
+# =========================================================================
 # CERTIFICATE HELPERS
 # =========================================================================
 PLACEHOLDER_RE = re.compile(r"\{\{.*?\}\}")
@@ -106,32 +129,33 @@ def pptx_bytes_to_pdf_bytes(pptx_bytes, timeout=60):
         with open(pdf_path, "rb") as f:
             return f.read()
 
+
 def pptx_bytes_to_image_bytes(pptx_bytes):
     """
-    Converts pptx bytes to PNG bytes using Aspose.Slides purely in Python.
-    Requires: pip install aspose-slides
+    Converts PPTX to Image by first converting to PDF (via LibreOffice), 
+    then taking a high-res snapshot of the PDF using PyMuPDF.
+    Requires: pip install PyMuPDF
     """
     try:
-        import aspose.slides as slides
+        import fitz  # PyMuPDF
     except ImportError:
-        st.error("Missing library. Please run: pip install aspose-slides")
+        st.error("Missing library. Please add 'PyMuPDF' to your requirements.txt")
         return None
 
     try:
-        out = io.BytesIO()
-        # Load the presentation from memory
-        with slides.Presentation(io.BytesIO(pptx_bytes)) as pres:
-            # Grab the first slide (assuming certificates are 1 slide)
-            slide = pres.slides[0]
-            # Convert to image (scale 2.0, 2.0 for high resolution)
-            img = slide.get_image(2.0, 2.0)
-            # Save the image as PNG into our BytesIO object
-            img.save(out, slides.ImageFormat.PNG)
+        pdf_bytes = pptx_bytes_to_pdf_bytes(pptx_bytes)
+        if not pdf_bytes:
+            return None
             
-        return out.getvalue()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = doc.load_page(0)
+        zoom = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=zoom, alpha=False)
+        return pix.tobytes("png")
     except Exception as e:
         st.error(f"Image conversion failed: {e}")
         return None
+
 
 def sanitize_filename(name):
     name = re.sub(r"[^\w\s-]", "", str(name)).strip()
@@ -140,7 +164,6 @@ def sanitize_filename(name):
 
 # =========================================================================
 # REUSABLE UI BLOCKS
-# (key_prefix keeps widget state independent between the two campaign tabs)
 # =========================================================================
 def render_audience(key_prefix, name_col="School Name"):
     """CSV upload + manual entry, merged and de-duplicated by Email. Returns (df, columns)."""
@@ -149,11 +172,15 @@ def render_audience(key_prefix, name_col="School Name"):
     df_csv = None
     with tab_csv:
         uploaded_csv = st.file_uploader(
-            f"Upload Data (CSV must include '{name_col}' and 'Email' columns — extra columns are fine and passed through)",
+            f"Upload Data (CSV must include an 'Email' and '{name_col}' column — case insensitive)",
             type="csv", key=f"{key_prefix}_csv_uploader",
         )
         if uploaded_csv:
-            df_csv = pd.read_csv(uploaded_csv)
+            try:
+                df_csv = pd.read_csv(uploaded_csv)
+                df_csv = normalize_dataframe_columns(df_csv, target_name_col=name_col)
+            except Exception as e:
+                st.error(f"Could not read CSV file: {e}")
 
     with tab_manual:
         st.caption(
@@ -183,8 +210,10 @@ def render_audience(key_prefix, name_col="School Name"):
                 pasted_rows.append({name_col: "", "Email": line})
 
     manual_clean = manual_df.copy()
-    manual_clean["Email"] = manual_clean.get("Email", "").astype(str).str.strip()
-    manual_clean = manual_clean[manual_clean["Email"] != ""]
+    manual_clean = normalize_dataframe_columns(manual_clean, target_name_col=name_col)
+    if "Email" in manual_clean.columns:
+        manual_clean["Email"] = manual_clean["Email"].astype(str).str.strip()
+        manual_clean = manual_clean[manual_clean["Email"] != ""]
 
     manual_parts = [p for p in [pd.DataFrame(pasted_rows), manual_clean] if not p.empty]
     manual_combined = pd.concat(manual_parts, ignore_index=True) if manual_parts else pd.DataFrame()
@@ -193,6 +222,7 @@ def render_audience(key_prefix, name_col="School Name"):
     df, columns = None, []
     if frames:
         df = pd.concat(frames, ignore_index=True)
+        df = normalize_dataframe_columns(df, target_name_col=name_col)
         if "Email" in df.columns:
             df = df.drop_duplicates(subset=["Email"], keep="first").reset_index(drop=True)
         columns = list(df.columns)
@@ -367,18 +397,18 @@ def render_certificate_section(key_prefix, df, csv_columns):
                             if cert_format == "PDF":
                                 pdf_bytes = pptx_bytes_to_pdf_bytes(filled)
                                 if pdf_bytes is None:
-                                    st.warning("⚠️ Couldn't convert to PDF (LibreOffice/`soffice` not found). Showing .pptx instead — the campaign will also fall back to .pptx.")
+                                    st.warning("⚠️ Couldn't convert to PDF (LibreOffice/`soffice` not found). Showing .pptx instead.")
                                     st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx")
                                 else:
                                     st.download_button("Download sample (.pdf)", pdf_bytes, file_name="sample_certificate.pdf", key=f"{key_prefix}_dl_pdf")
                             
                             elif cert_format == "Image":
                                 img_bytes = pptx_bytes_to_image_bytes(filled)
-                                if img_bytes is not None:
-                                    st.download_button("Download sample (.png)", img_bytes, file_name="sample_certificate.png", mime="image/png", key=f"{key_prefix}_dl_img")
-                                else:
-                                    st.warning("⚠️ Couldn't convert to Image. Showing .pptx instead — the campaign will also fall back to .pptx.")
+                                if img_bytes is None:
+                                    st.warning("⚠️ Couldn't convert to Image. Showing .pptx instead.")
                                     st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx")
+                                else:
+                                    st.download_button("Download sample (.png)", img_bytes, file_name="sample_certificate.png", mime="image/png", key=f"{key_prefix}_dl_img")
                             
                             else:
                                 st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx2")
@@ -423,11 +453,11 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
         status_text = st.empty()
         log_container = st.container()
         cert_fallback_warned = False
-        log_rows = []  # Timestamp / Email / Name / Certificate ID / Status
+        log_rows = []
 
         try:
             status_text.text("Connecting to secure Zoho Server...")
-            server = smtplib.SMTP("smtp.zoho.in", 587)  # Ensure this matches your Zoho datacenter (.in vs .com)
+            server = smtplib.SMTP("smtp.zoho.in", 587)
             server.starttls()
             server.login(sender_email, sender_password)
             status_text.text("✅ Authentication successful! Dispatching emails...")
@@ -492,7 +522,7 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
                                 cert_bytes = pdf_bytes
                                 cert_filename = f"Certificate_{fname_base}.pdf"
                             elif not cert_fallback_warned:
-                                log_container.write("⚠️ PDF conversion unavailable (LibreOffice/`soffice` not found) — attaching .pptx certificates instead.")
+                                log_container.write("⚠️ PDF conversion unavailable — attaching .pptx certificates instead.")
                                 cert_fallback_warned = True
                                 
                         elif cert_format == "Image":
@@ -521,7 +551,7 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
                                       "Certificate ID": cert_id, "Status": f"Failed: {row_err}"})
 
                 progress_bar.progress((index + 1) / total_emails)
-                time.sleep(2)  # Zoho rate-limit protection
+                time.sleep(2)
 
             server.quit()
             status_text.success("🎉 Campaign completely dispatched!")
@@ -535,7 +565,6 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
             log_df = pd.DataFrame(log_rows, columns=["Timestamp", "Email", "Name", "Certificate ID", "Status"])
             st.session_state[f"{key_prefix}_log_df"] = log_df
 
-    # Persisted log (survives the rerun triggered by the download button itself)
     if show_log and st.session_state.get(f"{key_prefix}_log_df") is not None:
         log_df = st.session_state[f"{key_prefix}_log_df"]
         st.subheader("📋 Send Log")
@@ -595,7 +624,6 @@ with campaign_tab2:
     )
     df_cert, cols_cert = render_audience("cert", name_col="Name")
 
-    # --- Auto-generate a unique Certificate ID per recipient ---
     if df_cert is not None and len(df_cert) > 0:
         st.write("")
         id_prefix = st.text_input("Certificate ID prefix", value="EI-CERT-", key="cert_id_prefix",
@@ -604,7 +632,8 @@ with campaign_tab2:
         df_cert["Certificate ID"] = [f"{id_prefix}{i+1:05d}" for i in range(len(df_cert))]
         cols_cert = list(df_cert.columns)
         with st.expander("🪪 Certificate IDs assigned", expanded=False):
-            st.dataframe(df_cert[["Email", "Name", "Certificate ID"]] if "Name" in df_cert.columns else df_cert, use_container_width=True)
+            display_cols = [c for c in ["Email", "Name", "Certificate ID"] if c in df_cert.columns]
+            st.dataframe(df_cert[display_cols] if display_cols else df_cert, use_container_width=True)
 
     st.write("---")
     st.header("2. Design Your Certificate Email")
