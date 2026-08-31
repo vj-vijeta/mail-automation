@@ -15,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from email import encoders
+from email.utils import formataddr
 
 from streamlit_quill import st_quill
 from pptx import Presentation
@@ -105,6 +106,32 @@ def pptx_bytes_to_pdf_bytes(pptx_bytes, timeout=60):
         with open(pdf_path, "rb") as f:
             return f.read()
 
+def pptx_bytes_to_image_bytes(pptx_bytes):
+    """
+    Converts pptx bytes to PNG bytes using Aspose.Slides purely in Python.
+    Requires: pip install aspose-slides
+    """
+    try:
+        import aspose.slides as slides
+    except ImportError:
+        st.error("Missing library. Please run: pip install aspose-slides")
+        return None
+
+    try:
+        out = io.BytesIO()
+        # Load the presentation from memory
+        with slides.Presentation(io.BytesIO(pptx_bytes)) as pres:
+            # Grab the first slide (assuming certificates are 1 slide)
+            slide = pres.slides[0]
+            # Convert to image (scale 2.0, 2.0 for high resolution)
+            img = slide.get_image(2.0, 2.0)
+            # Save the image as PNG into our BytesIO object
+            img.save(out, slides.ImageFormat.PNG)
+            
+        return out.getvalue()
+    except Exception as e:
+        st.error(f"Image conversion failed: {e}")
+        return None
 
 def sanitize_filename(name):
     name = re.sub(r"[^\w\s-]", "", str(name)).strip()
@@ -193,7 +220,7 @@ def render_compose(key_prefix, default_heading, token="{School Name}"):
         with tab1:
             with st.expander("ℹ️ How to use the Easy Builder", expanded=False):
                 st.write(f"""
-                * **Personalization:** Type `{token}` anywhere to automatically insert the recipient's name.
+                * **Personalization:** Type `{token}` anywhere to insert the recipient's name. Use `{{Certificate ID}}` to insert their generated ID.
                 * **Images:** Upload a local banner, and the app will embed it securely into the email body.
                 * **Colors:** Click the color boxes to match your branding.
                 """)
@@ -251,7 +278,7 @@ def render_compose(key_prefix, default_heading, token="{School Name}"):
             components.html(preview_html, height=500, scrolling=True)
 
     else:
-        st.info(f"💡 **Pro Tip:** You can still use `{token}` in your custom HTML. To embed a local image, upload it below and use `<img src=\"cid:inline_img\">` in your code.")
+        st.info(f"💡 **Pro Tip:** You can still use `{token}` and `{{Certificate ID}}` in your custom HTML. To embed a local image, upload it below and use `<img src=\"cid:inline_img\">` in your code.")
 
         local_inline_img = st.file_uploader(
             "Optional: Upload an image to embed as 'cid:inline_img'", type=['png', 'jpg', 'jpeg'], key=f"{key_prefix}_html_img"
@@ -275,12 +302,12 @@ def render_compose(key_prefix, default_heading, token="{School Name}"):
 
 
 def render_certificate_section(key_prefix, df, csv_columns):
-    """Certificate template upload + placeholder mapping. Returns (attach, template_bytes, sources, as_pdf)."""
+    """Certificate template upload + placeholder mapping. Returns (attach, template_bytes, sources, cert_format)."""
     attach_certificate = st.checkbox("📜 Generate & attach a personalized certificate to each email", key=f"{key_prefix}_attach_cert")
 
     cert_template_bytes = None
     placeholder_sources = {}
-    cert_as_pdf = True
+    cert_format = "PDF"
 
     if attach_certificate:
         cert_file = st.file_uploader("Upload certificate template (.pptx)", type=["pptx"], key=f"{key_prefix}_cert_file")
@@ -321,9 +348,12 @@ def render_certificate_section(key_prefix, df, csv_columns):
                             fixed_val = st.text_input("Value", key=f"{key_prefix}_fixed_{ph}", label_visibility="collapsed")
                             placeholder_sources[ph] = ("fixed", fixed_val)
 
-                cert_as_pdf = st.radio(
-                    "Attach certificate as", ["PDF (recommended)", "PPTX"], horizontal=True, key=f"{key_prefix}_cert_format"
-                ) == "PDF (recommended)"
+                format_choice = st.radio(
+                    "Attach certificate as", ["PDF (recommended)", "Image (PNG)", "PPTX"], horizontal=True, key=f"{key_prefix}_cert_format"
+                )
+                if "PDF" in format_choice: cert_format = "PDF"
+                elif "Image" in format_choice: cert_format = "Image"
+                else: cert_format = "PPTX"
 
                 if df is not None and len(df) > 0:
                     if st.button("🔍 Generate a sample certificate (first row)", key=f"{key_prefix}_sample_btn"):
@@ -333,13 +363,23 @@ def render_certificate_section(key_prefix, df, csv_columns):
                             mapping[ph] = sample_row.get(src_val, "") if (src_type == "column" and src_val) else (src_val or "")
                         try:
                             filled = fill_certificate(cert_template_bytes, mapping)
-                            if cert_as_pdf:
+                            
+                            if cert_format == "PDF":
                                 pdf_bytes = pptx_bytes_to_pdf_bytes(filled)
                                 if pdf_bytes is None:
                                     st.warning("⚠️ Couldn't convert to PDF (LibreOffice/`soffice` not found). Showing .pptx instead — the campaign will also fall back to .pptx.")
                                     st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx")
                                 else:
                                     st.download_button("Download sample (.pdf)", pdf_bytes, file_name="sample_certificate.pdf", key=f"{key_prefix}_dl_pdf")
+                            
+                            elif cert_format == "Image":
+                                img_bytes = pptx_bytes_to_image_bytes(filled)
+                                if img_bytes is not None:
+                                    st.download_button("Download sample (.png)", img_bytes, file_name="sample_certificate.png", mime="image/png", key=f"{key_prefix}_dl_img")
+                                else:
+                                    st.warning("⚠️ Couldn't convert to Image. Showing .pptx instead — the campaign will also fall back to .pptx.")
+                                    st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx")
+                            
                             else:
                                 st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx2")
                         except Exception as e:
@@ -347,7 +387,7 @@ def render_certificate_section(key_prefix, df, csv_columns):
                 else:
                     st.caption("Upload your audience CSV above to preview a sample certificate.")
 
-    return attach_certificate, cert_template_bytes, placeholder_sources, cert_as_pdf
+    return attach_certificate, cert_template_bytes, placeholder_sources, cert_format
 
 
 def render_subject_attachments(key_prefix, default_subject="Important Update"):
@@ -362,8 +402,8 @@ def render_subject_attachments(key_prefix, default_subject="Important Update"):
 
 
 def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject, uploaded_attachments,
-                       attach_certificate, cert_template_bytes, placeholder_sources, cert_as_pdf,
-                       sender_email, sender_password, name_col="School Name", token="{School Name}",
+                       attach_certificate, cert_template_bytes, placeholder_sources, cert_format,
+                       sender_name, sender_email, sender_password, name_col="School Name", token="{School Name}",
                        show_log=False):
     if df is None:
         st.info("Add your audience above to enable sending.")
@@ -408,9 +448,11 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
 
                 try:
                     personalized_body = generated_html.replace(token, str(recipient_name))
+                    if cert_id:
+                        personalized_body = personalized_body.replace("{Certificate ID}", str(cert_id))
 
                     msg = MIMEMultipart('related')
-                    msg['From'] = sender_email
+                    msg['From'] = formataddr((sender_name, sender_email))
                     msg['To'] = str(recipient_email)
                     msg['Subject'] = subject
 
@@ -444,13 +486,22 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
                         cert_bytes = filled_pptx
                         cert_filename = f"Certificate_{fname_base}.pptx"
 
-                        if cert_as_pdf:
+                        if cert_format == "PDF":
                             pdf_bytes = pptx_bytes_to_pdf_bytes(filled_pptx)
                             if pdf_bytes is not None:
                                 cert_bytes = pdf_bytes
                                 cert_filename = f"Certificate_{fname_base}.pdf"
                             elif not cert_fallback_warned:
                                 log_container.write("⚠️ PDF conversion unavailable (LibreOffice/`soffice` not found) — attaching .pptx certificates instead.")
+                                cert_fallback_warned = True
+                                
+                        elif cert_format == "Image":
+                            img_bytes = pptx_bytes_to_image_bytes(filled_pptx)
+                            if img_bytes is not None:
+                                cert_bytes = img_bytes
+                                cert_filename = f"Certificate_{fname_base}.png"
+                            elif not cert_fallback_warned:
+                                log_container.write("⚠️ Image conversion failed — attaching .pptx certificates instead.")
                                 cert_fallback_warned = True
 
                         cert_part = MIMEBase('application', 'octet-stream')
@@ -504,6 +555,7 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
 with st.sidebar:
     st.header("Server Credentials")
     st.info("💡 **Security Note:** Never use your primary login password. Generate an App-Specific Password in your Zoho Security Settings.")
+    sender_name = st.text_input("Sender Display Name", value="Ei Updates")
     sender_email = st.text_input("Zoho Email Address", value="@ei.study")
     sender_password = st.text_input("Zoho App Password", type="password")
     st.caption("Used for sending both campaign types below.")
@@ -530,8 +582,8 @@ with campaign_tab1:
     st.header("4. Dispatch")
     dispatch_campaign(
         "reg", df_reg, html_reg, img_reg, subject_reg, attachments_reg,
-        attach_certificate=False, cert_template_bytes=None, placeholder_sources={}, cert_as_pdf=True,
-        sender_email=sender_email, sender_password=sender_password,
+        attach_certificate=False, cert_template_bytes=None, placeholder_sources={}, cert_format="PDF",
+        sender_name=sender_name, sender_email=sender_email, sender_password=sender_password,
         name_col="School Name", token="{School Name}", show_log=False,
     )
 
@@ -563,7 +615,7 @@ with campaign_tab2:
 
     st.write("---")
     st.header("3. Certificate")
-    attach_cert, cert_bytes, cert_sources, cert_pdf = render_certificate_section("cert", df_cert, cols_cert)
+    attach_cert, cert_bytes, cert_sources, cert_format = render_certificate_section("cert", df_cert, cols_cert)
 
     st.write("---")
     st.header("4. Subject & Attachments")
@@ -574,7 +626,7 @@ with campaign_tab2:
     dispatch_campaign(
         "cert", df_cert, html_cert, img_cert, subject_cert, attachments_cert,
         attach_certificate=attach_cert, cert_template_bytes=cert_bytes,
-        placeholder_sources=cert_sources, cert_as_pdf=cert_pdf,
-        sender_email=sender_email, sender_password=sender_password,
+        placeholder_sources=cert_sources, cert_format=cert_format,
+        sender_name=sender_name, sender_email=sender_email, sender_password=sender_password,
         name_col="Name", token="{Name}", show_log=True,
     )
