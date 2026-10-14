@@ -29,10 +29,10 @@ st.write("Run a regular update campaign, or a separate certificate campaign — 
 # =========================================================================
 # HELPER: FLEXIBLE COLUMN NORMALIZATION
 # =========================================================================
-def normalize_dataframe_columns(df, target_name_col="School Name"):
+def normalize_dataframe_columns(df, target_name_col="Name"):
     """
-    Standardizes 'email' to 'Email'. 
-    Leaves other columns intact so multiple variables (Name, School Name, Event) can coexist.
+    Standardizes 'email' to 'Email' and the target name to 'Name'. 
+    Leaves all other columns (School Name, Event, etc.) intact to be used as dynamic variables.
     """
     if df is None or df.empty:
         return df
@@ -40,9 +40,10 @@ def normalize_dataframe_columns(df, target_name_col="School Name"):
     rename_map = {}
     for col in df.columns:
         clean_col = str(col).strip().lower()
-        if clean_col == "email":
+        if clean_col in ["email", "email id", "emailid", "mail"]:
             rename_map[col] = "Email"
-        # Removed the aggressive renaming to allow both "Name" and "School Name" in the same CSV
+        elif clean_col == target_name_col.lower():
+            rename_map[col] = target_name_col
 
     df = df.rename(columns=rename_map)
     return df
@@ -190,7 +191,7 @@ def sanitize_filename(name):
 # =========================================================================
 # REUSABLE UI BLOCKS
 # =========================================================================
-def render_audience(key_prefix, name_col="School Name"):
+def render_audience(key_prefix, name_col="Name"):
     tab_csv, tab_manual = st.tabs(["📁 Upload CSV", "✍️ Add Manually"])
 
     df_csv = None
@@ -208,8 +209,8 @@ def render_audience(key_prefix, name_col="School Name"):
 
     with tab_manual:
         st.caption(
-            "Handy for quick tests or small lists. Note: if you need extra per-recipient certificate "
-            f"fields, use CSV upload instead — manual entry only has {name_col} and Email."
+            "Handy for quick tests or small lists. Note: if you need extra per-recipient "
+            f"fields (like School Name or Event), use CSV upload instead — manual entry only has {name_col} and Email."
         )
         paste_text = st.text_area(
             f"Paste emails — one per line. Optionally prefix with a name: `{name_col}, email@domain.com`",
@@ -249,12 +250,12 @@ def render_audience(key_prefix, name_col="School Name"):
             with m1:
                 email_src = st.selectbox(
                     "Which column is the Email address?", csv_cols,
-                    index=detect_column(csv_cols, ["email", "mail"]), key=f"{key_prefix}_map_email",
+                    index=detect_column(csv_cols, ["email", "mail", "email id", "emailid"]), key=f"{key_prefix}_map_email",
                 )
             with m2:
                 name_src = st.selectbox(
                     f"Which column is the Recipient Name ({name_col})?", ["(none)"] + csv_cols,
-                    index=1 + detect_column(csv_cols, [name_col.lower(), "name", "recipient", "school", "student"]),
+                    index=1 + detect_column(csv_cols, [name_col.lower(), "name", "recipient"]),
                     key=f"{key_prefix}_map_name",
                 )
 
@@ -311,7 +312,7 @@ def _preview_row(key_prefix, df, token):
     return {token.strip("{}"): "Jane Doe", "School Name": "Sample School", "Event": "Sample Event"}
 
 
-def render_compose(key_prefix, default_heading, token="{School Name}", df=None):
+def render_compose(key_prefix, default_heading, token="{Name}", df=None):
     compose_mode = st.radio(
         "Choose your editor mode:",
         ["🧱 Easy Builder (No Coding)", "💻 Paste Custom HTML Code"],
@@ -517,7 +518,7 @@ def render_subject_attachments(key_prefix, default_subject="Important Update"):
 
 def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject, uploaded_attachments,
                        attach_certificate, cert_template_bytes, placeholder_sources, cert_format,
-                       sender_name, sender_email, sender_password, name_col="School Name", token="{School Name}",
+                       sender_name, sender_email, sender_password, name_col="Name", token="{Name}",
                        show_log=False):
     smtp_cfg = st.session_state.get("smtp_cfg", {})
     if df is None:
@@ -690,11 +691,10 @@ campaign_tab1, campaign_tab2 = st.tabs(["📧 Regular Email Campaign", "🎓 Cer
 
 with campaign_tab1:
     st.header("1. Audience")
-    df_reg, cols_reg = render_audience("reg", name_col="School Name")
+    df_reg, cols_reg = render_audience("reg", name_col="Name")
 
     st.write("---")
     st.header("2. Design Your Email")
-    # ✅ Update 1: Default heading populated with your variables
     html_reg, img_reg = render_compose(
         "reg", 
         default_heading="Welcome to {Event}, {School Name}!", 
@@ -704,7 +704,6 @@ with campaign_tab1:
 
     st.write("---")
     st.header("3. Subject & Attachments")
-    # ✅ Update 2: Default subject line populated
     subject_reg, attachments_reg = render_subject_attachments(
         "reg", 
         default_subject="An Invitation to Connect Regarding {Event}"
@@ -716,7 +715,7 @@ with campaign_tab1:
         "reg", df_reg, html_reg, img_reg, subject_reg, attachments_reg,
         attach_certificate=False, cert_template_bytes=None, placeholder_sources={}, cert_format="PDF",
         sender_name=sender_name, sender_email=sender_email, sender_password=sender_password,
-        name_col="School Name", token="{Name}", show_log=False,
+        name_col="Name", token="{Name}", show_log=False,
     )
 
 with campaign_tab2:
