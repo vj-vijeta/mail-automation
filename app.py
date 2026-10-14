@@ -31,8 +31,8 @@ st.write("Run a regular update campaign, or a separate certificate campaign — 
 # =========================================================================
 def normalize_dataframe_columns(df, target_name_col="School Name"):
     """
-    Standardizes 'email' and target name columns to exact keys ('Email', target_name_col)
-    regardless of user casing (e.g., 'EMAIL', 'email ', 'School name').
+    Standardizes 'email' to 'Email'. 
+    Leaves other columns intact so multiple variables (Name, School Name, Event) can coexist.
     """
     if df is None or df.empty:
         return df
@@ -42,8 +42,7 @@ def normalize_dataframe_columns(df, target_name_col="School Name"):
         clean_col = str(col).strip().lower()
         if clean_col == "email":
             rename_map[col] = "Email"
-        elif clean_col in [target_name_col.lower(), "name", "recipient", "school name"]:
-            rename_map[col] = target_name_col
+        # Removed the aggressive renaming to allow both "Name" and "School Name" in the same CSV
 
     df = df.rename(columns=rename_map)
     return df
@@ -54,9 +53,8 @@ def normalize_dataframe_columns(df, target_name_col="School Name"):
 # =========================================================================
 VAR_RE = re.compile(r"\{\{?\s*([^{}]+?)\s*\}?\}")
 
-
 def replace_variables(text, row):
-    """Replace {Var} / {{Var}} (case/whitespace-insensitive) with values from row. Unknown tokens are left as-is."""
+    """Replace {Var} / {{Var}} (case/whitespace-insensitive) with values from row."""
     if not text or not row:
         return text
     lookup = {str(k).strip().lower(): v for k, v in row.items()}
@@ -75,14 +73,12 @@ def replace_variables(text, row):
 
     return VAR_RE.sub(_sub, text)
 
-
 def detect_column(columns, keywords, fallback=0):
     for kw in keywords:
         for i, c in enumerate(columns):
             if kw in str(c).strip().lower():
                 return i
     return fallback if columns else 0
-
 
 def render_variable_chips(df):
     """Show every available variable with the first row's sample value."""
@@ -104,7 +100,6 @@ def render_variable_chips(df):
 # =========================================================================
 PLACEHOLDER_RE = re.compile(r"\{\{.*?\}\}")
 
-
 def _iter_text_frames(shapes):
     """Yield every text frame in a shape collection, recursing into groups and tables."""
     for shape in shapes:
@@ -117,9 +112,7 @@ def _iter_text_frames(shapes):
                 for cell in row.cells:
                     yield cell.text_frame
 
-
 def extract_placeholders(pptx_bytes):
-    """Return the sorted list of {{...}} placeholders found anywhere in the pptx template."""
     prs = Presentation(io.BytesIO(pptx_bytes))
     found = set()
     for slide in prs.slides:
@@ -129,12 +122,7 @@ def extract_placeholders(pptx_bytes):
                 found.update(PLACEHOLDER_RE.findall(full_text))
     return sorted(found)
 
-
 def fill_certificate(pptx_bytes, mapping):
-    """
-    mapping: dict like {'{{Name}}': 'Jane Doe', ...}
-    Returns the filled .pptx as bytes, with original template formatting preserved.
-    """
     prs = Presentation(io.BytesIO(pptx_bytes))
     for slide in prs.slides:
         for tf in _iter_text_frames(slide.shapes):
@@ -156,12 +144,7 @@ def fill_certificate(pptx_bytes, mapping):
     prs.save(out)
     return out.getvalue()
 
-
 def pptx_bytes_to_pdf_bytes(pptx_bytes, timeout=60):
-    """
-    Converts pptx bytes to pdf bytes using headless LibreOffice (soffice).
-    Returns None if conversion isn't possible so the caller can fall back to .pptx.
-    """
     with tempfile.TemporaryDirectory() as tmp:
         pptx_path = os.path.join(tmp, "cert.pptx")
         with open(pptx_path, "wb") as f:
@@ -179,19 +162,12 @@ def pptx_bytes_to_pdf_bytes(pptx_bytes, timeout=60):
         with open(pdf_path, "rb") as f:
             return f.read()
 
-
 def pptx_bytes_to_image_bytes(pptx_bytes):
-    """
-    Converts PPTX to Image by first converting to PDF (via LibreOffice), 
-    then taking a high-res snapshot of the PDF using PyMuPDF.
-    Requires: pip install PyMuPDF
-    """
     try:
         import fitz  # PyMuPDF
     except ImportError:
         st.error("Missing library. Please add 'PyMuPDF' to your requirements.txt")
         return None
-
     try:
         pdf_bytes = pptx_bytes_to_pdf_bytes(pptx_bytes)
         if not pdf_bytes:
@@ -206,7 +182,6 @@ def pptx_bytes_to_image_bytes(pptx_bytes):
         st.error(f"Image conversion failed: {e}")
         return None
 
-
 def sanitize_filename(name):
     name = re.sub(r"[^\w\s-]", "", str(name)).strip()
     return re.sub(r"[-\s]+", "_", name) or "certificate"
@@ -216,7 +191,6 @@ def sanitize_filename(name):
 # REUSABLE UI BLOCKS
 # =========================================================================
 def render_audience(key_prefix, name_col="School Name"):
-    """CSV upload + manual entry, merged and de-duplicated by Email. Returns (df, columns)."""
     tab_csv, tab_manual = st.tabs(["📁 Upload CSV", "✍️ Add Manually"])
 
     df_csv = None
@@ -268,7 +242,6 @@ def render_audience(key_prefix, name_col="School Name"):
     manual_parts = [p for p in [pd.DataFrame(pasted_rows), manual_clean] if not p.empty]
     manual_combined = pd.concat(manual_parts, ignore_index=True) if manual_parts else pd.DataFrame()
 
-    # --- Column & Variable Mapping for the uploaded CSV ---
     if df_csv is not None and not df_csv.empty:
         with st.expander("🎛️ Column & Variable Mapping", expanded=True):
             csv_cols = list(df_csv.columns)
@@ -326,7 +299,6 @@ def render_audience(key_prefix, name_col="School Name"):
 
 
 def _preview_row(key_prefix, df, token):
-    """Let the user pick which recipient to preview with; returns a row dict."""
     if df is not None and len(df) > 0:
         idx = st.number_input(
             f"Preview as recipient # (1–{len(df)})", min_value=1, max_value=len(df), value=1,
@@ -336,11 +308,10 @@ def _preview_row(key_prefix, df, token):
         st.caption(f"Previewing: {row.get('Email', '')}")
         return row
     st.caption("Upload an audience to preview with real data.")
-    return {token.strip("{}"): "Jane Doe"}
+    return {token.strip("{}"): "Jane Doe", "School Name": "Sample School", "Event": "Sample Event"}
 
 
 def render_compose(key_prefix, default_heading, token="{School Name}", df=None):
-    """Email design (Easy Builder or raw HTML). Returns (generated_html, local_inline_img)."""
     compose_mode = st.radio(
         "Choose your editor mode:",
         ["🧱 Easy Builder (No Coding)", "💻 Paste Custom HTML Code"],
@@ -381,8 +352,19 @@ def render_compose(key_prefix, default_heading, token="{School Name}", df=None):
 
             st.subheader("📝 Message Body")
             st.caption("Use the toolbar to bold text, add lists, or change font colors.")
+            
+            # Default HTML Body specifically set to your requirements
+            default_body_html = """
+            <p>Dear {Name},</p>
+            <p>I hope this email finds you well.</p>
+            <p>As part of our ongoing outreach to educators and administrators at {School Name}, I am reaching out to introduce you to our upcoming initiative, {Event}.</p>
+            <p>Our team has designed this program to support institutions like yours with innovative tools and resources tailored for modern learning environments. We believe this will be a valuable opportunity for your faculty and students to collaborate, explore new methodologies, and enhance their academic experiences.</p>
+            <p>We would love to share more details on how your institution can participate. Please feel free to explore the link below to learn more about the agenda and next steps.</p>
+            <p>Warm regards,<br><br>Vijeta<br>Educational Initiatives</p>
+            """
+            
             body_text = st_quill(
-                value="<p>Dear Recipient,</p><p>We are writing to share an important update.</p><p>Best regards,<br>The Team</p>",
+                value=default_body_html,
                 html=True, key=f"{key_prefix}_quill_builder",
             )
 
@@ -440,16 +422,13 @@ def render_compose(key_prefix, default_heading, token="{School Name}", df=None):
 
 
 def render_certificate_section(key_prefix, df, csv_columns):
-    """Certificate template upload + placeholder mapping. Returns (attach, template_bytes, sources, cert_format)."""
     attach_certificate = st.checkbox("📜 Generate & attach a personalized certificate to each email", key=f"{key_prefix}_attach_cert")
-
     cert_template_bytes = None
     placeholder_sources = {}
     cert_format = "PDF"
 
     if attach_certificate:
         cert_file = st.file_uploader("Upload certificate template (.pptx)", type=["pptx"], key=f"{key_prefix}_cert_file")
-
         if cert_file:
             cert_template_bytes = cert_file.read()
             try:
@@ -463,7 +442,6 @@ def render_certificate_section(key_prefix, df, csv_columns):
             else:
                 st.success(f"Found {len(placeholders)} placeholder(s): " + ", ".join(placeholders))
                 st.caption("Map each placeholder to a CSV column (personalized per recipient) or a fixed value used on every certificate.")
-
                 for ph in placeholders:
                     clean_name = ph.strip("{} ").strip()
                     c1, c2, c3 = st.columns([2, 1, 2])
@@ -501,15 +479,13 @@ def render_certificate_section(key_prefix, df, csv_columns):
                             mapping[ph] = sample_row.get(src_val, "") if (src_type == "column" and src_val) else (src_val or "")
                         try:
                             filled = fill_certificate(cert_template_bytes, mapping)
-                            
                             if cert_format == "PDF":
                                 pdf_bytes = pptx_bytes_to_pdf_bytes(filled)
                                 if pdf_bytes is None:
-                                    st.warning("⚠️ Couldn't convert to PDF (LibreOffice/`soffice` not found). Showing .pptx instead.")
+                                    st.warning("⚠️ Couldn't convert to PDF. Showing .pptx instead.")
                                     st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx")
                                 else:
                                     st.download_button("Download sample (.pdf)", pdf_bytes, file_name="sample_certificate.pdf", key=f"{key_prefix}_dl_pdf")
-                            
                             elif cert_format == "Image":
                                 img_bytes = pptx_bytes_to_image_bytes(filled)
                                 if img_bytes is None:
@@ -517,7 +493,6 @@ def render_certificate_section(key_prefix, df, csv_columns):
                                     st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx")
                                 else:
                                     st.download_button("Download sample (.png)", img_bytes, file_name="sample_certificate.png", mime="image/png", key=f"{key_prefix}_dl_img")
-                            
                             else:
                                 st.download_button("Download sample (.pptx)", filled, file_name="sample_certificate.pptx", key=f"{key_prefix}_dl_pptx2")
                         except Exception as e:
@@ -698,7 +673,6 @@ with st.sidebar:
         st.info("💡 Use your ZeptoMail **Send Mail token**. The From address must be on a domain verified in ZeptoMail.")
         sender_email = st.text_input("From Email Address", value="@ei.study")
         raw_key = st.text_input("ZeptoMail API Key / SMTP Password", type="password")
-        # Accept the key with or without the 'Zoho-enczapikey ' prefix
         sender_password = re.sub(r"^\s*Zoho-enczapikey\s+", "", raw_key or "").strip()
         st.session_state["smtp_cfg"] = {"host": "smtp.zeptomail.in", "user": "emailapikey"}
     else:
@@ -720,11 +694,21 @@ with campaign_tab1:
 
     st.write("---")
     st.header("2. Design Your Email")
-    html_reg, img_reg = render_compose("reg", default_heading="Important Update for {School Name}", token="{School Name}", df=df_reg)
+    # ✅ Update 1: Default heading populated with your variables
+    html_reg, img_reg = render_compose(
+        "reg", 
+        default_heading="Welcome to {Event}, {School Name}!", 
+        token="{Name}", 
+        df=df_reg
+    )
 
     st.write("---")
     st.header("3. Subject & Attachments")
-    subject_reg, attachments_reg = render_subject_attachments("reg")
+    # ✅ Update 2: Default subject line populated
+    subject_reg, attachments_reg = render_subject_attachments(
+        "reg", 
+        default_subject="An Invitation to Connect Regarding {Event}"
+    )
 
     st.write("---")
     st.header("4. Dispatch")
@@ -732,7 +716,7 @@ with campaign_tab1:
         "reg", df_reg, html_reg, img_reg, subject_reg, attachments_reg,
         attach_certificate=False, cert_template_bytes=None, placeholder_sources={}, cert_format="PDF",
         sender_name=sender_name, sender_email=sender_email, sender_password=sender_password,
-        name_col="School Name", token="{School Name}", show_log=False,
+        name_col="School Name", token="{Name}", show_log=False,
     )
 
 with campaign_tab2:
@@ -756,7 +740,6 @@ with campaign_tab2:
 
     st.write("---")
     st.header("2. Design Your Certificate Email")
-    st.caption("This email design is independent too — write a certificate-specific message here.")
     html_cert, img_cert = render_compose(
         "cert", default_heading="Your Certificate is Here, {Name}!", token="{Name}", df=df_cert
     )
