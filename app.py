@@ -50,6 +50,56 @@ def normalize_dataframe_columns(df, target_name_col="School Name"):
 
 
 # =========================================================================
+# HELPER: MULTI-VARIABLE ENGINE
+# =========================================================================
+VAR_RE = re.compile(r"\{\{?\s*([^{}]+?)\s*\}?\}")
+
+
+def replace_variables(text, row):
+    """Replace {Var} / {{Var}} (case/whitespace-insensitive) with values from row. Unknown tokens are left as-is."""
+    if not text or not row:
+        return text
+    lookup = {str(k).strip().lower(): v for k, v in row.items()}
+
+    def _sub(m):
+        key = m.group(1).strip().lower()
+        if key not in lookup:
+            return m.group(0)
+        val = lookup[key]
+        try:
+            if pd.isna(val):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return str(val)
+
+    return VAR_RE.sub(_sub, text)
+
+
+def detect_column(columns, keywords, fallback=0):
+    for kw in keywords:
+        for i, c in enumerate(columns):
+            if kw in str(c).strip().lower():
+                return i
+    return fallback if columns else 0
+
+
+def render_variable_chips(df):
+    """Show every available variable with the first row's sample value."""
+    if df is None or df.empty:
+        return
+    sample = df.iloc[0].to_dict()
+    chips = " ".join(
+        f"<span style='display:inline-block;margin:3px;padding:4px 10px;border-radius:14px;"
+        f"background:#eef3ff;border:1px solid #c5d5ff;font-size:13px;color:#1f3b7a'>"
+        f"<code>{{{c}}}</code> → {str(sample.get(c, ''))[:30]}</span>"
+        for c in df.columns
+    )
+    st.markdown("**🏷️ Available variables** (use in subject, heading, body, button):", unsafe_allow_html=False)
+    st.markdown(chips, unsafe_allow_html=True)
+
+
+# =========================================================================
 # CERTIFICATE HELPERS
 # =========================================================================
 PLACEHOLDER_RE = re.compile(r"\{\{.*?\}\}")
@@ -218,14 +268,56 @@ def render_audience(key_prefix, name_col="School Name"):
     manual_parts = [p for p in [pd.DataFrame(pasted_rows), manual_clean] if not p.empty]
     manual_combined = pd.concat(manual_parts, ignore_index=True) if manual_parts else pd.DataFrame()
 
+    # --- Column & Variable Mapping for the uploaded CSV ---
+    if df_csv is not None and not df_csv.empty:
+        with st.expander("🎛️ Column & Variable Mapping", expanded=True):
+            csv_cols = list(df_csv.columns)
+            m1, m2 = st.columns(2)
+            with m1:
+                email_src = st.selectbox(
+                    "Which column is the Email address?", csv_cols,
+                    index=detect_column(csv_cols, ["email", "mail"]), key=f"{key_prefix}_map_email",
+                )
+            with m2:
+                name_src = st.selectbox(
+                    f"Which column is the Recipient Name ({name_col})?", ["(none)"] + csv_cols,
+                    index=1 + detect_column(csv_cols, [name_col.lower(), "name", "recipient", "school", "student"]),
+                    key=f"{key_prefix}_map_name",
+                )
+
+            df_csv = df_csv.copy()
+            df_csv["Email"] = df_csv[email_src]
+            if name_src != "(none)":
+                df_csv[name_col] = df_csv[name_src]
+
+            st.caption(
+                "Every CSV column is already a variable, e.g. `{" + str(csv_cols[0]) + "}`. "
+                "Optionally add your own variable names and pick which column each one uses:"
+            )
+            alias_df = st.data_editor(
+                pd.DataFrame([{"Variable": "", "CSV Column": None}]),
+                num_rows="dynamic", use_container_width=True, key=f"{key_prefix}_alias_editor",
+                column_config={
+                    "Variable": st.column_config.TextColumn("Variable name (used as {Variable})"),
+                    "CSV Column": st.column_config.SelectboxColumn("Takes value from column", options=csv_cols),
+                },
+            )
+            for _, a in alias_df.iterrows():
+                var = str(a.get("Variable") or "").strip().strip("{} ")
+                src = a.get("CSV Column")
+                if var and src in df_csv.columns:
+                    df_csv[var] = df_csv[src]
+
     frames = [f for f in [df_csv, manual_combined] if f is not None and not f.empty]
     df, columns = None, []
     if frames:
         df = pd.concat(frames, ignore_index=True)
-        df = normalize_dataframe_columns(df, target_name_col=name_col)
+        df = df.loc[:, ~df.columns.duplicated()]
         if "Email" in df.columns:
+            df["Email"] = df["Email"].astype(str).str.strip()
             df = df.drop_duplicates(subset=["Email"], keep="first").reset_index(drop=True)
         columns = list(df.columns)
+        render_variable_chips(df)
         with st.expander("📊 Preview audience data", expanded=False):
             st.metric("Total Recipients", len(df))
             st.dataframe(df, use_container_width=True)
@@ -233,7 +325,21 @@ def render_audience(key_prefix, name_col="School Name"):
     return df, columns
 
 
-def render_compose(key_prefix, default_heading, token="{School Name}"):
+def _preview_row(key_prefix, df, token):
+    """Let the user pick which recipient to preview with; returns a row dict."""
+    if df is not None and len(df) > 0:
+        idx = st.number_input(
+            f"Preview as recipient # (1–{len(df)})", min_value=1, max_value=len(df), value=1,
+            key=f"{key_prefix}_preview_idx_{st.session_state.get(key_prefix + '_pv', 0)}",
+        )
+        row = df.iloc[int(idx) - 1].to_dict()
+        st.caption(f"Previewing: {row.get('Email', '')}")
+        return row
+    st.caption("Upload an audience to preview with real data.")
+    return {token.strip("{}"): "Jane Doe"}
+
+
+def render_compose(key_prefix, default_heading, token="{School Name}", df=None):
     """Email design (Easy Builder or raw HTML). Returns (generated_html, local_inline_img)."""
     compose_mode = st.radio(
         "Choose your editor mode:",
@@ -302,7 +408,8 @@ def render_compose(key_prefix, default_heading, token="{School Name}"):
 
         with tab2:
             st.write("### Inbox Preview")
-            preview_html = generated_html.replace(token, "Jane Doe")
+            row = _preview_row(key_prefix + "_b", df, token)
+            preview_html = replace_variables(generated_html, row)
             if local_inline_img:
                 preview_html = preview_html.replace("cid:inline_img", "https://via.placeholder.com/600x150.png?text=Your+Uploaded+Banner+Will+Appear+Here")
             components.html(preview_html, height=500, scrolling=True)
@@ -323,7 +430,8 @@ def render_compose(key_prefix, default_heading, token="{School Name}"):
             )
         with preview_tab:
             st.write("### Inbox Preview")
-            preview_html = generated_html.replace(token, "Jane Doe")
+            row = _preview_row(key_prefix + "_h", df, token)
+            preview_html = replace_variables(generated_html, row)
             if local_inline_img:
                 preview_html = preview_html.replace("cid:inline_img", "https://via.placeholder.com/600x150.png?text=Your+Uploaded+Banner+Will+Appear+Here")
             components.html(preview_html, height=500, scrolling=True)
@@ -423,7 +531,8 @@ def render_certificate_section(key_prefix, df, csv_columns):
 def render_subject_attachments(key_prefix, default_subject="Important Update"):
     col1, col2 = st.columns(2)
     with col1:
-        subject = st.text_input("Email Subject", value=default_subject, key=f"{key_prefix}_subject")
+        subject = st.text_input("Email Subject", value=default_subject, key=f"{key_prefix}_subject",
+                                help="You can use variables here too, e.g. {Name}")
     with col2:
         uploaded_attachments = st.file_uploader(
             "Attach files sent to everyone (PDF, Excel, etc.)", accept_multiple_files=True, key=f"{key_prefix}_attachments"
@@ -435,6 +544,7 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
                        attach_certificate, cert_template_bytes, placeholder_sources, cert_format,
                        sender_name, sender_email, sender_password, name_col="School Name", token="{School Name}",
                        show_log=False):
+    smtp_cfg = st.session_state.get("smtp_cfg", {})
     if df is None:
         st.info("Add your audience above to enable sending.")
         return
@@ -442,7 +552,7 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
     st.warning("⚠️ Double-check your preview and data. Once you click send, the emails will be dispatched immediately.")
     if st.button("🚀 Confirm & Send Campaign", type="primary", key=f"{key_prefix}_send_btn"):
         if not all([sender_email, sender_password, subject]):
-            st.error("❌ Please ensure your Zoho credentials and Subject line are filled out.")
+            st.error("❌ Please ensure your sender credentials and Subject line are filled out.")
             return
         if attach_certificate and not cert_template_bytes:
             st.error("❌ Certificate attachment is enabled but no template was uploaded.")
@@ -456,10 +566,10 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
         log_rows = []
 
         try:
-            status_text.text("Connecting to secure Zoho Server...")
-            server = smtplib.SMTP("smtp.zoho.in", 587)
+            status_text.text(f"Connecting to {smtp_cfg.get('host', 'smtp.zoho.in')}...")
+            server = smtplib.SMTP(smtp_cfg.get("host", "smtp.zoho.in"), 587)
             server.starttls()
-            server.login(sender_email, sender_password)
+            server.login(smtp_cfg.get("user", sender_email), sender_password)
             status_text.text("✅ Authentication successful! Dispatching emails...")
 
             total_emails = len(rows)
@@ -477,14 +587,13 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
                     continue
 
                 try:
-                    personalized_body = generated_html.replace(token, str(recipient_name))
-                    if cert_id:
-                        personalized_body = personalized_body.replace("{Certificate ID}", str(cert_id))
+                    personalized_body = replace_variables(generated_html, row)
+                    personalized_subject = replace_variables(subject, row)
 
                     msg = MIMEMultipart('related')
                     msg['From'] = formataddr((sender_name, sender_email))
                     msg['To'] = str(recipient_email)
-                    msg['Subject'] = subject
+                    msg['Subject'] = personalized_subject
 
                     msg_alternative = MIMEMultipart('alternative')
                     msg.attach(msg_alternative)
@@ -557,7 +666,7 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
             status_text.success("🎉 Campaign completely dispatched!")
 
         except smtplib.SMTPAuthenticationError:
-            st.error("❌ Authentication Error: Invalid Zoho Email or App Password.")
+            st.error("❌ Authentication Error: Invalid sender email or password / API key.")
         except Exception as e:
             st.error(f"❌ A system error occurred: {e}")
 
@@ -583,10 +692,20 @@ def dispatch_campaign(key_prefix, df, generated_html, local_inline_img, subject,
 # =========================================================================
 with st.sidebar:
     st.header("Server Credentials")
-    st.info("💡 **Security Note:** Never use your primary login password. Generate an App-Specific Password in your Zoho Security Settings.")
+    provider = st.radio("Email service", ["ZeptoMail", "Zoho Mail"], horizontal=True)
     sender_name = st.text_input("Sender Display Name", value="Ei Updates")
-    sender_email = st.text_input("Zoho Email Address", value="@ei.study")
-    sender_password = st.text_input("Zoho App Password", type="password")
+    if provider == "ZeptoMail":
+        st.info("💡 Use your ZeptoMail **Send Mail token**. The From address must be on a domain verified in ZeptoMail.")
+        sender_email = st.text_input("From Email Address", value="@ei.study")
+        raw_key = st.text_input("ZeptoMail API Key / SMTP Password", type="password")
+        # Accept the key with or without the 'Zoho-enczapikey ' prefix
+        sender_password = re.sub(r"^\s*Zoho-enczapikey\s+", "", raw_key or "").strip()
+        st.session_state["smtp_cfg"] = {"host": "smtp.zeptomail.in", "user": "emailapikey"}
+    else:
+        st.info("💡 **Security Note:** Never use your primary login password. Generate an App-Specific Password in your Zoho Security Settings.")
+        sender_email = st.text_input("Zoho Email Address", value="@ei.study")
+        sender_password = st.text_input("Zoho App Password", type="password")
+        st.session_state["smtp_cfg"] = {"host": "smtp.zoho.in", "user": sender_email}
     st.caption("Used for sending both campaign types below.")
 
 
@@ -601,7 +720,7 @@ with campaign_tab1:
 
     st.write("---")
     st.header("2. Design Your Email")
-    html_reg, img_reg = render_compose("reg", default_heading="Important Update for {School Name}", token="{School Name}")
+    html_reg, img_reg = render_compose("reg", default_heading="Important Update for {School Name}", token="{School Name}", df=df_reg)
 
     st.write("---")
     st.header("3. Subject & Attachments")
@@ -639,7 +758,7 @@ with campaign_tab2:
     st.header("2. Design Your Certificate Email")
     st.caption("This email design is independent too — write a certificate-specific message here.")
     html_cert, img_cert = render_compose(
-        "cert", default_heading="Your Certificate is Here, {Name}!", token="{Name}"
+        "cert", default_heading="Your Certificate is Here, {Name}!", token="{Name}", df=df_cert
     )
 
     st.write("---")
